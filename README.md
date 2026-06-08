@@ -128,3 +128,55 @@ print(state.state_size_bytes())
 - Increase `block_size` to reduce compression variance. Memory grows roughly like `block_size * log(N)` plus the low-degree moment sketch.
 - This construction is most accurate in the article's high-temperature/small-radius regime, where `scale * <q,k>` is not too large.
 - For normal transformer activations, start with the standard scale `1/sqrt(d)` or normalize keys/queries during experiments.
+
+## Fast implementation
+
+`fast_article_attention.py` is a separate speed-oriented implementation.  It keeps the same Taylor/residual decomposition, but it avoids the slow per-token Python query path used in the reference module.
+
+Main differences from the reference implementation:
+
+- exact low-degree Taylor moments are computed with a tight streaming moment loop on CPU, or with prefix tensors on CUDA via `--low-mode auto`;
+- completed residual blocks are compressed to pair-sampled block coresets;
+- the current block residual is evaluated exactly with small causal block matrices;
+- `--compressor none` evaluates the residual exactly and should match classical causal attention up to floating-point error.
+
+CPU example:
+
+```bash
+python fast_article_attention.py \
+  --sweep-n 256 512 1024 \
+  --d 32 --dv 32 \
+  --degree 2 --block-size 128 \
+  --data unit_ball --radius 1 \
+  --scale 1 \
+  --device cpu \
+  --threads 1
+```
+
+Exact-decomposition check:
+
+```bash
+python fast_article_attention.py \
+  --sweep-n 256 \
+  --d 32 --dv 32 \
+  --degree 2 --block-size 128 \
+  --compressor none \
+  --data unit_ball --radius 1 \
+  --scale 1 \
+  --device cpu --threads 1
+```
+
+Python usage:
+
+```python
+from fast_article_attention import fast_article_causal_attention
+
+approx = fast_article_causal_attention(
+    q, k, v,
+    degree=2,
+    block_size=128,
+    scale=1.0,
+    compressor="sorted_pair",
+    low_mode="auto",
+)
+```
