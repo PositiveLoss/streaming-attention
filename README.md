@@ -324,4 +324,3 @@ Notes:
 - `compress_stride=2` gives a half-sized deterministic segment-mean residual coreset for completed blocks.
 - The Triton file uses a fused direct Taylor-prefix evaluation for speed experiments.  It avoids the `N x N` score matrix, but it is not the literal online streaming-state implementation from the paper.
 - The current compact kernels target head dimensions `D <= 128` and value dimensions `Dv <= 256`.
-- The artifact was generated in a CPU-only container without Triton installed, so GPU numerical/performance validation must be run on your CUDA machine.
