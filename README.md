@@ -45,7 +45,10 @@ So the code is faithful to the constructive decomposition, but the default compr
 - `streaming_taylor_coreset_attention.py` — implementation and small demo CLI.
 - `benchmark_attention.py` — benchmark against exact classical causal attention.
 - `test_streaming_attention.py` — sanity tests.
-- `requirements.txt` — minimal dependency list.
+- `fast_article_attention.py` — vectorized PyTorch speed path.
+- `test_fast_article_attention.py` — sanity tests for the speed path.
+- `triton_article_attention.py` — CUDA/Triton residual kernels and benchmark CLI.
+- `test_triton_article_attention.py` — CPU fallback test plus optional CUDA correctness check.
 
 ## Quick sanity run
 
@@ -180,3 +183,145 @@ approx = fast_article_causal_attention(
     low_mode="auto",
 )
 ```
+
+## Fast implementation
+
+A separate optimized file is included as `fast_article_attention.py`. It specializes the Taylor feature map for degrees 0, 1, and 2, uses a tight streaming moment loop for the low-degree Taylor state, and evaluates the residual with chunked matrix multiplies over block coresets. It is designed for speed sweeps; the reference `streaming_taylor_coreset_attention.py` remains the closer literal merge-and-reduce implementation.
+
+Example:
+
+```bash
+python fast_article_attention.py --sweep-n 256 512 1024 --d 32 --dv 32 --degree 2 --block-size 128 --data unit_ball --scale 1 --threads 1
+```
+
+Use `compressor none` to check that the Taylor + exact residual decomposition reconstructs classical attention up to roundoff.
+
+
+
+## Triton/CUDA implementation
+
+`triton_article_attention.py` adds GPU-first kernels for benchmarking:
+
+- `triton_article_causal_attention(...)`: fused article-style approximation.
+- `triton_flash_causal_attention(...)`: exact FlashAttention-style causal baseline that avoids the `N x N` score matrix.
+- `torch_classical_causal_attention(...)`: PyTorch exact reference used by the benchmark.
+
+The Triton article kernel is optimized for GPU throughput. It evaluates the low-degree Taylor term directly over causal tiles, keeps the residual exact inside the current article block, and uses deterministic segment-mean representatives for completed-block residuals. Set `--compress-stride 1` to disable residual compression; in that mode the residual path is exact and the result should match classical causal attention up to floating-point differences.
+
+CUDA benchmark example:
+
+```bash
+python triton_article_attention.py \
+  --sweep-n 512 1024 2048 4096 \
+  --d 32 --dv 32 \
+  --degree 2 \
+  --block-size 128 \
+  --compress-stride 2 \
+  --data unit_ball --radius 1 \
+  --scale 1 \
+  --device cuda \
+  --dtype float16 \
+  --repeats 20
+```
+
+Exact-residual check on a CUDA + Triton machine:
+
+```bash
+python triton_article_attention.py \
+  --sweep-n 256 512 \
+  --d 32 --dv 32 \
+  --degree 2 \
+  --block-size 128 \
+  --compress-stride 1 \
+  --device cuda \
+  --dtype float16
+```
+
+Python usage:
+
+```python
+from triton_article_attention import triton_article_causal_attention, triton_flash_causal_attention
+
+article_out = triton_article_causal_attention(
+    q.cuda(), k.cuda(), v.cuda(),
+    degree=2,
+    block_size=128,
+    compress_stride=2,
+    scale=1.0,
+)
+
+exact_triton_out = triton_flash_causal_attention(q.cuda(), k.cuda(), v.cuda(), scale=1.0)
+```
+
+Current kernel constraints:
+
+- Requires a CUDA-enabled PyTorch build and `triton`.
+- Supports `[N,D]` and `[B,H,N,D]` inputs.
+- Supports `float16`, `bfloat16`, and `float32` inputs with fp32 accumulation.
+- Supports Taylor degree `0`, `1`, or `2`.
+- Compact kernel limits: `D <= 128`, `Dv <= 256`.
+- `block_size` must be divisible by `compress_stride`.
+
+Caveat: this file is a GPU-throughput implementation, not the literal online streaming data structure. The low-degree Taylor term is fused directly over causal tiles for speed. The reference file remains the closer implementation of the article’s streaming construction.
+
+## Triton CUDA kernels
+
+`triton_article_attention.py` adds GPU-first Triton kernels.  It is separate from both the reference implementation and the vectorized PyTorch fast path.
+
+Provided APIs:
+
+```python
+from triton_article_attention import (
+    triton_article_causal_attention,
+    triton_flash_causal_attention,
+)
+
+# Approximate article-style Taylor + residual-coreset attention.
+approx = triton_article_causal_attention(
+    q, k, v,
+    degree=2,
+    block_size=128,
+    compress_stride=2,   # 1 disables residual compression
+    scale=1.0,
+)
+
+# Exact causal baseline using a FlashAttention-style online softmax kernel.
+exact_triton = triton_flash_causal_attention(q, k, v, scale=1.0)
+```
+
+Benchmark example on a CUDA machine with Triton installed:
+
+```bash
+python triton_article_attention.py \
+  --sweep-n 256 512 1024 2048 \
+  --d 32 --dv 32 \
+  --degree 2 \
+  --block-size 128 \
+  --compress-stride 2 \
+  --data unit_ball \
+  --scale 1 \
+  --dtype float16 \
+  --repeats 10
+```
+
+Exact-decomposition check:
+
+```bash
+python triton_article_attention.py \
+  --sweep-n 256 \
+  --d 32 --dv 32 \
+  --degree 2 \
+  --block-size 128 \
+  --compress-stride 1 \
+  --data unit_ball \
+  --scale 1 \
+  --dtype float16
+```
+
+Notes:
+
+- `compress_stride=1` disables residual compression and should match exact causal softmax attention up to floating-point error in the high-temperature regime.
+- `compress_stride=2` gives a half-sized deterministic segment-mean residual coreset for completed blocks.
+- The Triton file uses a fused direct Taylor-prefix evaluation for speed experiments.  It avoids the `N x N` score matrix, but it is not the literal online streaming-state implementation from the paper.
+- The current compact kernels target head dimensions `D <= 128` and value dimensions `Dv <= 256`.
+- The artifact was generated in a CPU-only container without Triton installed, so GPU numerical/performance validation must be run on your CUDA machine.
