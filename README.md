@@ -1,6 +1,6 @@
 # Streaming Taylor + Coreset Attention in PyTorch
 
-This is an executable PyTorch implementation of the constructive high-temperature upper-bound idea from the uploaded TeX source for **"Towards Tight Bounds for Streaming Attention"** (`arXiv-2606.07205v1`).
+This is an executable PyTorch implementation of the constructive high-temperature upper-bound idea from **"Towards Tight Bounds for Streaming Attention"** (`arXiv-2606.07205v1`).
 
 The source defines the softmax kernel
 
